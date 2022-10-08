@@ -17,11 +17,11 @@ usage() {
         e.g. my_process_name
         required
         the name of the kubedeps process and will be the filename of the tombstone, this is the name that should be refered to in birth and death deps
-      KUBEDEPS_GRAVEYARD_PATH
+      KUBEDEPS_GRAVEYARD
         e.g. /graveyard
         required
         the path of the kubedeps graveyard
-      KUBEDEPS_BIRTH
+      KUBEDEPS_BIRTH_DEPS
         e.g. deps1,deps2
         default to none (empty string)
         list of coma separated birth deps (corresponding to KUBEDEPS_NAME of the deps)
@@ -29,7 +29,7 @@ usage() {
         e.g. 15
         default to 30
         number of seconds before considering that process birth wait timed out
-      KUBEDEPS_DEATH
+      KUBEDEPS_DEATH_DEPS
         e.g. deps3,deps4
         default to none (empty string)
         list of coma separated death deps (corresponding to KUBEDEPS_NAME of the deps)
@@ -56,12 +56,12 @@ if [ -z "${KUBEDEPS_NAME}" ]; then
   echo "[error]     KUBEDEPS_NAME must be defined"
   usage
   exit 1
-elif [ -z "${KUBEDEPS_GRAVEYARD_PATH}" ]; then
-  echo "[error]    KUBEDEPS_GRAVEYARD_PATH must be defined"
+elif [ -z "${KUBEDEPS_GRAVEYARD}" ]; then
+  echo "[error]    KUBEDEPS_GRAVEYARD must be defined"
   usage
   exit 1
-elif [ ! -z "${KUBEDEPS_GRAVEYARD_PATH}" ] && [ ! -d "${KUBEDEPS_GRAVEYARD_PATH}" ]; then
-  echo "[error]     KUBEDEPS_GRAVEYARD_PATH doesn't exist or is not a folder"
+elif [ ! -z "${KUBEDEPS_GRAVEYARD}" ] && [ ! -d "${KUBEDEPS_GRAVEYARD}" ]; then
+  echo "[error]     KUBEDEPS_GRAVEYARD doesn't exist or is not a folder"
   usage
   exit 1
 elif [ "${#}" -eq 0 ]; then
@@ -71,13 +71,13 @@ elif [ "${#}" -eq 0 ]; then
 fi
 
 NAME=${KUBEDEPS_NAME}
-GRAVEYARD_PATH=${KUBEDEPS_GRAVEYARD_PATH}
+GRAVEYARD=${KUBEDEPS_GRAVEYARD}
 CHILD_CMD="${@}"
 
-BIRTH=${KUBEDEPS_BIRTH}
+BIRTH_DEPS=${KUBEDEPS_BIRTH_DEPS}
 BIRTH_TIMEOUT=${KUBEDEPS_BIRTH_TIMEOUT=30}
 
-DEATH=${KUBEDEPS_DEATH}
+DEATH_DEPS=${KUBEDEPS_DEATH_DEPS}
 GRACE_PERIOD=${KUBEDEPS_GRACE_PERIOD=30}
 
 READY_CMD=${KUBEDEPS_READY_CMD}
@@ -107,16 +107,14 @@ echo "
   
   command: ${CHILD_CMD}
   KUBEDEPS_NAME=${NAME}
-  KUBEDEPS_GRAVEYARD_PATH=${GRAVEYARD_PATH}
-  KUBEDEPS_BIRTH=${BIRTH}
+  KUBEDEPS_GRAVEYARD=${GRAVEYARD}
+  KUBEDEPS_BIRTH_DEPS=${BIRTH_DEPS}
   KUBEDEPS_BIRTH_TIMEOUT=${BIRTH_TIMEOUT=30}
-  KUBEDEPS_DEATH=${DEATH}
+  KUBEDEPS_DEATH_DEPS=${DEATH_DEPS}
   KUBEDEPS_GRACE_PERIOD=${GRACE_PERIOD}
   KUBEDEPS_READY_CMD=${READY_CMD}
   KUBEDEPS_READY_INTERVAL=${READY_INTERVAL=5}
   KUBEDEPS_READY_TIMEOUT=${READY_TIMEOUT=30}
-  KUBEDEPS_EXIT_CODES=${EXIT_CODES}
-  KUBEDEPS_USE_POLLING=${USE_POLLING}
   KUBEDEPS_POLLING_INTERVAL=${POLLING_INTERVAL=10}
 --------
 "
@@ -157,23 +155,23 @@ timeout_for()
 ###
 
 carve_tombstone() {
-  if [ -z ${@} ] && [ -f "${GRAVEYARD_PATH}/${NAME}" ]; then
-    echo "[error]     conflict, ${GRAVEYARD_PATH}/${NAME} already exists"
+  if [ -z ${@} ] && [ -f "${GRAVEYARD}/${NAME}" ]; then
+    echo "[error]     conflict, ${GRAVEYARD}/${NAME} already exists"
     exit 2
   elif [ -z ${@} ]; then
-    echo "[tombstone]  Creating tombstone at ${GRAVEYARD_PATH}/${NAME}"
-    echo -e 'birth:\nready:\ndeath:\n\nchild_exit_code:\nexit_code:' > "${GRAVEYARD_PATH}/${NAME}"
-  elif [ ! -w "${GRAVEYARD_PATH}/${NAME}" ]; then
-    echo "[error]     ${GRAVEYARD_PATH}/${NAME} is not found or is not writable"
+    echo "[tombstone]  Creating tombstone at ${GRAVEYARD}/${NAME}"
+    echo -e 'birth:\nready:\ndeath:' > "${GRAVEYARD}/${NAME}"
+  elif [ ! -w "${GRAVEYARD}/${NAME}" ]; then
+    echo "[error]     ${GRAVEYARD}/${NAME} is not found or is not writable"
     exit 3
-  elif [ ! -z ${@} ] && [ -w "${GRAVEYARD_PATH}/${NAME}" ]; then
-    echo "[tombstone]  Carving ${1} on tombstone at ${GRAVEYARD_PATH}/${NAME}"
-    if ! grep -q -e "^${1}:$" "${GRAVEYARD_PATH}/${NAME}"; then
-      echo "[error]     conflict, ${1} already carved on ${GRAVEYARD_PATH}/${NAME}"
+  elif [ ! -z ${@} ] && [ -w "${GRAVEYARD}/${NAME}" ]; then
+    echo "[tombstone]  Carving ${1} on tombstone at ${GRAVEYARD}/${NAME}"
+    if ! grep -q -e "^${1}:$" "${GRAVEYARD}/${NAME}"; then
+      echo "[error]     conflict, ${1} already carved on ${GRAVEYARD}/${NAME}"
       exit 4
     fi
 
-    cat "${GRAVEYARD_PATH}/${NAME}" | sed "s/^${1}:$/${1}: $(date -Ins -u)/g" > "${GRAVEYARD_PATH}/${NAME}"
+    cat "${GRAVEYARD}/${NAME}" | sed "s/^${1}:$/${1}: $(date -Ins -u)/g" > "${GRAVEYARD}/${NAME}"
   fi
 }
 
@@ -245,7 +243,7 @@ wait_for() {
     echo "[watcher]    > Waiting for ${1} to fulfill event: ${WAIT_FOR_EVENT}"
     # For every deps, check if the event is fulfilled
     for file in "${WAIT_FOR_FILES[@]}"; do
-      WAIT_FOR_FILE="${GRAVEYARD_PATH}/${file}"
+      WAIT_FOR_FILE="${GRAVEYARD}/${file}"
       IS_FULFILLED=$(is_event_fulfilled ${WAIT_FOR_FILE} ${WAIT_FOR_EVENT})
 
       # Early break the loop on the first unfulfilled event
@@ -300,7 +298,7 @@ watch_for_death_deps() {
   }
   trap "watch_for_death_deps_before_exit" EXIT
 
-  wait_for_deps_event "${DEATH}" death& WAIT_FOR_DEATH_DEPS=$!
+  wait_for_deps_event "${DEATH_DEPS}" death& WAIT_FOR_DEATH_DEPS=$!
   wait ${WAIT_FOR_DEATH_DEPS}
   echo "Death dependecies are met"
   kill -TERM ${KUBEDEPS_PID}
@@ -339,13 +337,13 @@ carve_tombstone
 
 # If death deps are passed, watch for them and this will kill the whole process
 # if they are met
-if [ ! -z "${DEATH}" ]; then
+if [ ! -z "${DEATH_DEPS}" ]; then
   watch_for_death_deps& DEATH_WATCHER_PID=$!
 fi
 
 # If birth deps are passed, watch for them and continue once fulfilled
-if [ ! -z "${BIRTH}" ]; then
-  wait_for_deps_event "${BIRTH}" ready ${BIRTH_TIMEOUT}& BIRTH_WATCHER_PID=$!
+if [ ! -z "${BIRTH_DEPS}" ]; then
+  wait_for_deps_event "${BIRTH_DEPS}" ready ${BIRTH_TIMEOUT}& BIRTH_WATCHER_PID=$!
   wait ${BIRTH_WATHER_PID}
 fi
 
