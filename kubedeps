@@ -1,0 +1,367 @@
+# /bin/sh
+
+usage() {
+  echo "
+    Usage:
+    kubedeps [child_process_cmd]
+
+    child_process_cmd:  any executable command with its argments, as a single string
+                        e.g. \"sh -c 'ls -la'\"
+
+    environment variables:
+      KUBEDEPS_POLLING_INTERVAL
+        e.g. 30
+        default to 10
+        used to determine the number of seconds between each check (birth and death)
+      KUBEDEPS_NAME
+        e.g. my_process_name
+        required
+        the name of the kubedeps process and will be the filename of the tombstone, this is the name that should be refered to in birth and death deps
+      KUBEDEPS_GRAVEYARD_PATH
+        e.g. /graveyard
+        required
+        the path of the kubedeps graveyard
+      KUBEDEPS_BIRTH
+        e.g. deps1,deps2
+        default to none (empty string)
+        list of coma separated birth deps (corresponding to KUBEDEPS_NAME of the deps)
+      KUBEDEPS_BIRTH_TIMEOUT
+        e.g. 15
+        default to 30
+        number of seconds before considering that process birth wait timed out
+      KUBEDEPS_DEATH
+        e.g. deps3,deps4
+        default to none (empty string)
+        list of coma separated death deps (corresponding to KUBEDEPS_NAME of the deps)
+      KUBEDEPS_GRACE_PERIOD
+        e.g. 45
+        default to 30
+        grace period for the child process to exit before exiting the kubedeps process, note that we will not force kill the child process but just exit
+      KUBEDEPS_READY_CMD
+        e.g. ls
+        default to none (empty string)
+        command exiting with 0 when process is ready or else with a non-zero exit code
+      KUBEDEPS_READY_INTERVAL
+        e.g. 10
+        default to 5
+        number of seconds between each KUBEDEPS_READY_CMD invocation
+      KUBEDEPS_READY_TIMEOUT
+        e.g. 60
+        default to 30
+        number of seconds before considering that the child process failed to start
+  "
+}
+
+if [ -z "${KUBEDEPS_NAME}" ]; then
+  echo "[error]     KUBEDEPS_NAME must be defined"
+  usage
+  exit 1
+elif [ -z "${KUBEDEPS_GRAVEYARD_PATH}" ]; then
+  echo "[error]    KUBEDEPS_GRAVEYARD_PATH must be defined"
+  usage
+  exit 1
+elif [ ! -z "${KUBEDEPS_GRAVEYARD_PATH}" ] && [ ! -d "${KUBEDEPS_GRAVEYARD_PATH}" ]; then
+  echo "[error]     KUBEDEPS_GRAVEYARD_PATH doesn't exist or is not a folder"
+  usage
+  exit 1
+elif [ "${#}" -eq 0 ]; then
+  echo "[error]     no child process to execute"
+  usage
+  exit 1
+fi
+
+NAME=${KUBEDEPS_NAME}
+GRAVEYARD_PATH=${KUBEDEPS_GRAVEYARD_PATH}
+CHILD_CMD="${@}"
+
+BIRTH=${KUBEDEPS_BIRTH}
+BIRTH_TIMEOUT=${KUBEDEPS_BIRTH_TIMEOUT=30}
+
+DEATH=${KUBEDEPS_DEATH}
+GRACE_PERIOD=${KUBEDEPS_GRACE_PERIOD=30}
+
+READY_CMD=${KUBEDEPS_READY_CMD}
+READY_INTERVAL=${KUBEDEPS_READY_INTERVAL=5}
+READY_TIMEOUT=${KUBEDEPS_READY_TIMEOUT=30}
+
+POLLING_INTERVAL=${KUBEDEPS_POLLING_INTERVAL=10}
+
+###
+## Runtime values
+###
+
+KUBEDEPS_PID=$$
+CHILD_PID=
+DEATH_WATCHER_PID=
+BIRTH_WATCHER_PID=
+READINESS_WATCHER_PID=
+CHILD_EXIT_CODE=
+
+###
+## Print values on startup
+###
+
+echo "
+--------
+  Starting kubedeps with values
+  
+  command: ${CHILD_CMD}
+  KUBEDEPS_NAME=${NAME}
+  KUBEDEPS_GRAVEYARD_PATH=${GRAVEYARD_PATH}
+  KUBEDEPS_BIRTH=${BIRTH}
+  KUBEDEPS_BIRTH_TIMEOUT=${BIRTH_TIMEOUT=30}
+  KUBEDEPS_DEATH=${DEATH}
+  KUBEDEPS_GRACE_PERIOD=${GRACE_PERIOD}
+  KUBEDEPS_READY_CMD=${READY_CMD}
+  KUBEDEPS_READY_INTERVAL=${READY_INTERVAL=5}
+  KUBEDEPS_READY_TIMEOUT=${READY_TIMEOUT=30}
+  KUBEDEPS_EXIT_CODES=${EXIT_CODES}
+  KUBEDEPS_USE_POLLING=${USE_POLLING}
+  KUBEDEPS_POLLING_INTERVAL=${POLLING_INTERVAL=10}
+--------
+"
+
+###
+## Utility functions
+###
+
+get_own_pid() {
+  cut -d' ' -f4 < /proc/self/stat \
+    | xargs -I% sh -c 'cut -d" " -f4 < /proc/%/stat'
+}
+
+get_parent_pid() {
+  cut -d' ' -f4 < /proc/self/stat \
+    | xargs -I% sh -c 'cut -d" " -f4 < /proc/%/stat' \
+    | xargs -I% sh -c 'cut -d" " -f4 < /proc/%/stat'
+}
+
+timeout_for()
+{
+    remove_timer() {
+      trap - EXIT
+      kill -9 ${SLEEP_PID} > /dev/null 2>&1
+      exit 0
+    }
+    trap "remove_timer" ALRM
+    trap "remove_timer" EXIT
+
+    sleep $1& SLEEP_PID=$!
+    wait
+    TIMEOUT_PARENT_PID=$(get_parent_pid)
+    kill -ALRM ${TIMEOUT_PARENT_PID}
+}
+
+###
+## Defining functions
+###
+
+carve_tombstone() {
+  if [ -z ${@} ] && [ -f "${GRAVEYARD_PATH}/${NAME}" ]; then
+    echo "[error]     conflict, ${GRAVEYARD_PATH}/${NAME} already exists"
+    exit 2
+  elif [ -z ${@} ]; then
+    echo "[tombstone]  Creating tombstone at ${GRAVEYARD_PATH}/${NAME}"
+    echo -e 'birth:\nready:\ndeath:\n\nchild_exit_code:\nexit_code:' > "${GRAVEYARD_PATH}/${NAME}"
+  elif [ ! -w "${GRAVEYARD_PATH}/${NAME}" ]; then
+    echo "[error]     ${GRAVEYARD_PATH}/${NAME} is not found or is not writable"
+    exit 3
+  elif [ ! -z ${@} ] && [ -w "${GRAVEYARD_PATH}/${NAME}" ]; then
+    echo "[tombstone]  Carving ${1} on tombstone at ${GRAVEYARD_PATH}/${NAME}"
+    if ! grep -q -e "^${1}:$" "${GRAVEYARD_PATH}/${NAME}"; then
+      echo "[error]     conflict, ${1} already carved on ${GRAVEYARD_PATH}/${NAME}"
+      exit 4
+    fi
+
+    cat "${GRAVEYARD_PATH}/${NAME}" | sed "s/^${1}:$/${1}: $(date -Ins -u)/g" > "${GRAVEYARD_PATH}/${NAME}"
+  fi
+}
+
+# Kill all the descendant processes before exiting
+# Allow a grace period for a graceful shutdown
+clean_exit() {
+  # Kill watchers if they exists
+  kill -TERM ${BIRTH_WATCHER_PID} ${DEATH_WATCHER_PID} ${READINESS_WATCHER_PID} > /dev/null 2>&1
+  # Clean signal trap for EXIT
+  trap - EXIT
+
+  echo "[main]       Process exit started."
+
+  # If the child process was started, bring it down gracefully or
+  # forcefully if timeout is exceeded
+  if [ ! -z ${CHILD_PID} ]; then
+    # This function will be called if the child process is still alive after grace period
+    exit_after_grace_period_timeout() {
+      # Clean signal trap for ALRM
+      trap - ALRM
+      echo "[watcher]    Children grace period timed out"
+      carve_tombstone death
+      # Exit with error code because child was forced exit
+      exit 5
+    }
+    trap "exit_after_grace_period_timeout" ALRM
+
+    # Sending SIGTERM to child process, allowwing for graceful shutdown
+    kill -TERM ${CHILD_PID} > /dev/null 2>&1
+    echo "[watcher]    Waiting for graceful shutdown or timeout (${GRACE_PERIOD}s)"
+    # Launching a timeout process in the background and store its PID in TIMEOUT_PROCESS_PID
+    timeout_for ${GRACE_PERIOD}& TIMEOUT_PROCESS_PID=$!
+    # Wait for child process to exit
+    wait ${CHILD_PID}
+    carve_tombstone death
+    # If child process did exit before timeout, stop the timeout process
+    kill -ALRM ${TIMEOUT_PROCESS_PID}
+    echo "[main]       Graceful shutdown done."
+  else
+    echo "[main]       Child was never started, exiting."
+    carve_tombstone death
+    exit 6
+  fi
+
+  echo "[main]       Done."
+  exit ${CHILD_EXIT_CODE}
+}
+
+is_event_fulfilled() {
+  FILE_TO_CHECK="${1}"
+  EVENT_TO_CHECK="${2}"
+
+  # Check if this specific dep fulfilled the event, return no if it didn't or yes if it did
+  if [ ! -f ${WAIT_FOR_FILE} ] || ! grep -q -E "^${EVENT_TO_CHECK}: .+" "${FILE_TO_CHECK}"; then
+    echo no
+    exit
+  fi
+
+  echo yes
+}
+
+wait_for() {
+  # Get event and files from arguments
+  WAIT_FOR_EVENT="${2}"
+  IFS=',' read -ra WAIT_FOR_FILES <<< "${1}"
+
+  # Loop until event are fulfilled
+  while true; do
+    echo "[watcher]    > Waiting for ${1} to fulfill event: ${WAIT_FOR_EVENT}"
+    # For every deps, check if the event is fulfilled
+    for file in "${WAIT_FOR_FILES[@]}"; do
+      WAIT_FOR_FILE="${GRAVEYARD_PATH}/${file}"
+      IS_FULFILLED=$(is_event_fulfilled ${WAIT_FOR_FILE} ${WAIT_FOR_EVENT})
+
+      # Early break the loop on the first unfulfilled event
+      if [ "${IS_FULFILLED}" = "no" ]; then
+        break
+      fi
+    done
+
+    # If the loop ended on an unfulfilled event, wait and retry,
+    # else all the events are fulfilled, then break the infinity loop and exit watcher
+    if [ "${IS_FULFILLED}" = "no" ]; then
+      sleep ${POLLING_INTERVAL}
+    else
+      echo "[watcher]    > Events fulfilled"
+      break
+    fi
+  done
+}
+
+# This function must be launched as a background process
+wait_for_deps_event() {
+  WAIT_FOR_DEPS=${1}
+  WAIT_FOR_DEPS_EVENT=${2}
+  WAIT_FOR_DEPS_TIEMOUT="${3}"
+
+  if [ ! -z "${WAIT_FOR_DEPS_TIEMOUT}" ]; then
+    # If timeout is reached, kill watcher and exit
+    wait_for_deps_event_timeout_reached() {
+      echo "[error]     timeout reached before deps conditions were fulfilled (${WAIT_FOR_DEPS}: ${WAIT_FOR_DEPS_EVENT})"
+      exit
+    }
+    trap "wait_for_deps_event_timeout_reached" ALRM
+    wait_for_deps_event_before_exit() {
+      kill -TERM ${SHOULD_LIVE_WATCHER_PID} ${SHOULD_LIVE_TIMEOUT_PID} > /dev/null 2>&1
+    }
+    trap "wait_for_deps_event_before_exit" EXIT
+
+    # Start watching for event and start timeout countdown
+    wait_for "${WAIT_FOR_DEPS}" "${WAIT_FOR_DEPS_EVENT}"& SHOULD_LIVE_WATCHER_PID=$!
+    timeout_for ${WAIT_FOR_DEPS_TIEMOUT}& SHOULD_LIVE_TIMEOUT_PID=$!
+    # Wait for watcher to complete successfully
+    wait ${SHOULD_LIVE_WATCHER_PID}
+    exit
+  else
+    wait_for "${WAIT_FOR_DEPS}" "${WAIT_FOR_DEPS_EVENT}"
+  fi
+}
+
+watch_for_death_deps() {
+  watch_for_death_deps_before_exit() {
+    kill -TERM ${WAIT_FOR_DEATH_DEPS} > /dev/null 2>&1
+  }
+  trap "watch_for_death_deps_before_exit" EXIT
+
+  wait_for_deps_event "${DEATH}" death& WAIT_FOR_DEATH_DEPS=$!
+  wait ${WAIT_FOR_DEATH_DEPS}
+  echo "Death dependecies are met"
+  kill -TERM ${KUBEDEPS_PID}
+}
+
+watch_for_readiness() {
+  watch_for_readiness_before_exit() {
+    trap - EXIT
+    kill -TERM ${WAIT_FOR_READINESS_TIMEOUT_PID} ${WAIT_FOR_READINESS_SLEEP_PID} > /dev/null 2>&1
+  }
+  trap "watch_for_readiness_before_exit" EXIT
+  watch_for_readiness_timeout_reached() {
+    echo "[error]     timeout reached while waiting for child process to be ready"
+    kill -TERM ${KUBEDEPS_PID}
+  }
+  trap "watch_for_readiness_timeout_reached" ALRM
+
+  timeout_for ${READY_TIMEOUT}& WAIT_FOR_READINESS_TIMEOUT_PID=$!
+  while ! sh -c "${READY_CMD} > /dev/null 2>&1"
+  do
+    echo "> Waiting for child process to be ready"
+    sleep ${READY_INTERVAL}& WAIT_FOR_READINESS_SLEEP_PID=$!
+    wait ${WAIT_FOR_READINESS_SLEEP_PID}
+  done;
+}
+
+###
+## Run the script
+###
+
+# Catch exit and execute clean_exit function
+trap "clean_exit" EXIT
+
+# Initialise an empty tombstone
+carve_tombstone
+
+# If death deps are passed, watch for them and this will kill the whole process
+# if they are met
+if [ ! -z "${DEATH}" ]; then
+  watch_for_death_deps& DEATH_WATCHER_PID=$!
+fi
+
+# If birth deps are passed, watch for them and continue once fulfilled
+if [ ! -z "${BIRTH}" ]; then
+  wait_for_deps_event "${BIRTH}" ready ${BIRTH_TIMEOUT}& BIRTH_WATCHER_PID=$!
+  wait ${BIRTH_WATHER_PID}
+fi
+
+# Launch child process
+"${CHILD_CMD}"& CHILD_PID=$!
+echo "[status]     alive"
+carve_tombstone birth
+
+# If readiness command is given, wait for readiness
+if [ ! -z "${READY_CMD}" ]; then
+  watch_for_readiness& READINESS_WATCHER_PID=$!
+  wait ${READINESS_WATCHER_PID}
+fi
+echo "[status]     ready"
+carve_tombstone ready
+
+wait ${CHILD_PID}
+CHILD_EXIT_CODE=${?}
+echo "[status]     Child exited with code: ${CHILD_EXIT_CODE}"
