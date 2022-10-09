@@ -49,6 +49,10 @@ usage() {
         e.g. 60
         default to 30
         number of seconds before considering that the child process failed to start
+      KUBEDEPS_EXIT_CODE
+        e.g. 0
+        default to none, will use the child process exit code
+        exit code used by the kubedeps process
   "
 }
 
@@ -72,7 +76,7 @@ fi
 
 NAME=${KUBEDEPS_NAME}
 GRAVEYARD=${KUBEDEPS_GRAVEYARD}
-CHILD_CMD="${@}"
+CHILD_CMD="${*}"
 
 BIRTH_DEPS=${KUBEDEPS_BIRTH_DEPS}
 BIRTH_TIMEOUT=${KUBEDEPS_BIRTH_TIMEOUT=30}
@@ -85,6 +89,8 @@ READY_INTERVAL=${KUBEDEPS_READY_INTERVAL=5}
 READY_TIMEOUT=${KUBEDEPS_READY_TIMEOUT=30}
 
 POLLING_INTERVAL=${KUBEDEPS_POLLING_INTERVAL=10}
+
+EXIT_CODE=${KUBEDEPS_EXIT_CODE}
 
 ###
 ## Runtime values
@@ -138,16 +144,16 @@ timeout_for()
 {
     remove_timer() {
       trap - EXIT
-      kill -9 ${SLEEP_PID} > /dev/null 2>&1
+      kill -9 "${SLEEP_PID}" > /dev/null 2>&1
       exit 0
     }
     trap "remove_timer" ALRM
     trap "remove_timer" EXIT
 
-    sleep $1& SLEEP_PID=$!
+    sleep "${1}"& SLEEP_PID=$!
     wait
     TIMEOUT_PARENT_PID=$(get_parent_pid)
-    kill -ALRM ${TIMEOUT_PARENT_PID}
+    kill -ALRM "${TIMEOUT_PARENT_PID}"
 }
 
 ###
@@ -155,23 +161,25 @@ timeout_for()
 ###
 
 carve_tombstone() {
-  if [ -z ${@} ] && [ -f "${GRAVEYARD}/${NAME}" ]; then
-    echo "[error]     conflict, ${GRAVEYARD}/${NAME} already exists"
+  if [ -z "${1}" ] && [ -f "${GRAVEYARD}/${NAME}" ]; then
+    echo "[error]      conflict, ${GRAVEYARD}/${NAME} already exists"
     exit 2
-  elif [ -z ${@} ]; then
+  elif [ -z "${1}" ]; then
     echo "[tombstone]  Creating tombstone at ${GRAVEYARD}/${NAME}"
-    echo -e 'birth:\nready:\ndeath:' > "${GRAVEYARD}/${NAME}"
+    echo 'birth:' > "${GRAVEYARD}/${NAME}"
+    echo 'ready:' >> "${GRAVEYARD}/${NAME}"
+    echo 'death:' >> "${GRAVEYARD}/${NAME}"
   elif [ ! -w "${GRAVEYARD}/${NAME}" ]; then
-    echo "[error]     ${GRAVEYARD}/${NAME} is not found or is not writable"
+    echo "[error]      ${GRAVEYARD}/${NAME} is not found or is not writable"
     exit 3
-  elif [ ! -z ${@} ] && [ -w "${GRAVEYARD}/${NAME}" ]; then
+  elif [ ! -z "${1}" ] && [ -w "${GRAVEYARD}/${NAME}" ]; then
     echo "[tombstone]  Carving ${1} on tombstone at ${GRAVEYARD}/${NAME}"
     if ! grep -q -e "^${1}:$" "${GRAVEYARD}/${NAME}"; then
-      echo "[error]     conflict, ${1} already carved on ${GRAVEYARD}/${NAME}"
+      echo "[error]      conflict, ${1} already carved on ${GRAVEYARD}/${NAME}"
       exit 4
     fi
 
-    cat "${GRAVEYARD}/${NAME}" | sed "s/^${1}:$/${1}: $(date -Ins -u)/g" > "${GRAVEYARD}/${NAME}"
+    sed -i "s/^${1}:$/${1}: $(date -Ins -u)/g" "${GRAVEYARD}/${NAME}"
   fi
 }
 
@@ -179,7 +187,7 @@ carve_tombstone() {
 # Allow a grace period for a graceful shutdown
 clean_exit() {
   # Kill watchers if they exists
-  kill -TERM ${BIRTH_WATCHER_PID} ${DEATH_WATCHER_PID} ${READINESS_WATCHER_PID} > /dev/null 2>&1
+  kill -TERM "${BIRTH_WATCHER_PID}" "${DEATH_WATCHER_PID}" "${READINESS_WATCHER_PID}" > /dev/null 2>&1
   # Clean signal trap for EXIT
   trap - EXIT
 
@@ -187,7 +195,7 @@ clean_exit() {
 
   # If the child process was started, bring it down gracefully or
   # forcefully if timeout is exceeded
-  if [ ! -z ${CHILD_PID} ]; then
+  if [ ! -z "${CHILD_PID}" ] && [ -z "${CHILD_EXIT_CODE}" ]; then
     # This function will be called if the child process is still alive after grace period
     exit_after_grace_period_timeout() {
       # Clean signal trap for ALRM
@@ -200,24 +208,32 @@ clean_exit() {
     trap "exit_after_grace_period_timeout" ALRM
 
     # Sending SIGTERM to child process, allowwing for graceful shutdown
-    kill -TERM ${CHILD_PID} > /dev/null 2>&1
+    kill -TERM "${CHILD_PID}" > /dev/null 2>&1
     echo "[watcher]    Waiting for graceful shutdown or timeout (${GRACE_PERIOD}s)"
     # Launching a timeout process in the background and store its PID in TIMEOUT_PROCESS_PID
     timeout_for ${GRACE_PERIOD}& TIMEOUT_PROCESS_PID=$!
     # Wait for child process to exit
-    wait ${CHILD_PID}
+    wait "${CHILD_PID}"
+    CHILD_EXIT_CODE="${?}"
+    echo "[status]     Child exited with code: ${CHILD_EXIT_CODE}"
     carve_tombstone death
     # If child process did exit before timeout, stop the timeout process
-    kill -ALRM ${TIMEOUT_PROCESS_PID}
+    kill -ALRM "${TIMEOUT_PROCESS_PID}"
     echo "[main]       Graceful shutdown done."
-  else
+  elif [ -z "${CHILD_PID}" ]; then
     echo "[main]       Child was never started, exiting."
     carve_tombstone death
     exit 6
   fi
 
   echo "[main]       Done."
-  exit ${CHILD_EXIT_CODE}
+  if [ ! -z "${EXIT_CODE}" ]; then
+    exit "${EXIT_CODE}"
+  elif [ ! -z "${CHILD_EXIT_CODE}" ]; then
+    exit "${CHILD_EXIT_CODE}"
+  fi
+
+  exit 0
 }
 
 is_event_fulfilled() {
@@ -225,7 +241,7 @@ is_event_fulfilled() {
   EVENT_TO_CHECK="${2}"
 
   # Check if this specific dep fulfilled the event, return no if it didn't or yes if it did
-  if [ ! -f ${WAIT_FOR_FILE} ] || ! grep -q -E "^${EVENT_TO_CHECK}: .+" "${FILE_TO_CHECK}"; then
+  if [ ! -f "${WAIT_FOR_FILE}" ] || ! grep -q -E "^${EVENT_TO_CHECK}: .+" "${FILE_TO_CHECK}"; then
     echo no
     exit
   fi
@@ -236,15 +252,16 @@ is_event_fulfilled() {
 wait_for() {
   # Get event and files from arguments
   WAIT_FOR_EVENT="${2}"
-  IFS=',' read -ra WAIT_FOR_FILES <<< "${1}"
+  WAIT_FOR_FILES=$(echo "${1}" | tr ',' ' ')
 
+  echo "WAIT_FOR_FILES ${WAIT_FOR_FILES}"
   # Loop until event are fulfilled
   while true; do
     echo "[watcher]    > Waiting for ${1} to fulfill event: ${WAIT_FOR_EVENT}"
     # For every deps, check if the event is fulfilled
-    for file in "${WAIT_FOR_FILES[@]}"; do
+    for file in ${WAIT_FOR_FILES}; do
       WAIT_FOR_FILE="${GRAVEYARD}/${file}"
-      IS_FULFILLED=$(is_event_fulfilled ${WAIT_FOR_FILE} ${WAIT_FOR_EVENT})
+      IS_FULFILLED=$(is_event_fulfilled "${WAIT_FOR_FILE}" "${WAIT_FOR_EVENT}")
 
       # Early break the loop on the first unfulfilled event
       if [ "${IS_FULFILLED}" = "no" ]; then
@@ -255,7 +272,7 @@ wait_for() {
     # If the loop ended on an unfulfilled event, wait and retry,
     # else all the events are fulfilled, then break the infinity loop and exit watcher
     if [ "${IS_FULFILLED}" = "no" ]; then
-      sleep ${POLLING_INTERVAL}
+      sleep "${POLLING_INTERVAL}"
     else
       echo "[watcher]    > Events fulfilled"
       break
@@ -265,8 +282,8 @@ wait_for() {
 
 # This function must be launched as a background process
 wait_for_deps_event() {
-  WAIT_FOR_DEPS=${1}
-  WAIT_FOR_DEPS_EVENT=${2}
+  WAIT_FOR_DEPS="${1}"
+  WAIT_FOR_DEPS_EVENT="${2}"
   WAIT_FOR_DEPS_TIEMOUT="${3}"
 
   if [ ! -z "${WAIT_FOR_DEPS_TIEMOUT}" ]; then
@@ -277,15 +294,15 @@ wait_for_deps_event() {
     }
     trap "wait_for_deps_event_timeout_reached" ALRM
     wait_for_deps_event_before_exit() {
-      kill -TERM ${SHOULD_LIVE_WATCHER_PID} ${SHOULD_LIVE_TIMEOUT_PID} > /dev/null 2>&1
+      kill -TERM "${SHOULD_LIVE_WATCHER_PID}" "${SHOULD_LIVE_TIMEOUT_PID}" > /dev/null 2>&1
     }
     trap "wait_for_deps_event_before_exit" EXIT
 
     # Start watching for event and start timeout countdown
     wait_for "${WAIT_FOR_DEPS}" "${WAIT_FOR_DEPS_EVENT}"& SHOULD_LIVE_WATCHER_PID=$!
-    timeout_for ${WAIT_FOR_DEPS_TIEMOUT}& SHOULD_LIVE_TIMEOUT_PID=$!
+    timeout_for "${WAIT_FOR_DEPS_TIEMOUT}"& SHOULD_LIVE_TIMEOUT_PID=$!
     # Wait for watcher to complete successfully
-    wait ${SHOULD_LIVE_WATCHER_PID}
+    wait "${SHOULD_LIVE_WATCHER_PID}"
     exit
   else
     wait_for "${WAIT_FOR_DEPS}" "${WAIT_FOR_DEPS_EVENT}"
@@ -294,34 +311,34 @@ wait_for_deps_event() {
 
 watch_for_death_deps() {
   watch_for_death_deps_before_exit() {
-    kill -TERM ${WAIT_FOR_DEATH_DEPS} > /dev/null 2>&1
+    kill -TERM "${WAIT_FOR_DEATH_DEPS}" > /dev/null 2>&1
   }
   trap "watch_for_death_deps_before_exit" EXIT
 
   wait_for_deps_event "${DEATH_DEPS}" death& WAIT_FOR_DEATH_DEPS=$!
-  wait ${WAIT_FOR_DEATH_DEPS}
-  echo "Death dependecies are met"
-  kill -TERM ${KUBEDEPS_PID}
+  wait "${WAIT_FOR_DEATH_DEPS}"
+  echo "[watcher]    > Death dependecies are met"
+  kill -TERM "${KUBEDEPS_PID}"
 }
 
 watch_for_readiness() {
   watch_for_readiness_before_exit() {
     trap - EXIT
-    kill -TERM ${WAIT_FOR_READINESS_TIMEOUT_PID} ${WAIT_FOR_READINESS_SLEEP_PID} > /dev/null 2>&1
+    kill -TERM "${WAIT_FOR_READINESS_TIMEOUT_PID}" "${WAIT_FOR_READINESS_SLEEP_PID}" > /dev/null 2>&1
   }
   trap "watch_for_readiness_before_exit" EXIT
   watch_for_readiness_timeout_reached() {
     echo "[error]     timeout reached while waiting for child process to be ready"
-    kill -TERM ${KUBEDEPS_PID}
+    kill -TERM "${KUBEDEPS_PID}"
   }
   trap "watch_for_readiness_timeout_reached" ALRM
 
-  timeout_for ${READY_TIMEOUT}& WAIT_FOR_READINESS_TIMEOUT_PID=$!
+  timeout_for "${READY_TIMEOUT}"& WAIT_FOR_READINESS_TIMEOUT_PID=$!
   while ! sh -c "${READY_CMD} > /dev/null 2>&1"
   do
     echo "> Waiting for child process to be ready"
-    sleep ${READY_INTERVAL}& WAIT_FOR_READINESS_SLEEP_PID=$!
-    wait ${WAIT_FOR_READINESS_SLEEP_PID}
+    sleep "${READY_INTERVAL}"& WAIT_FOR_READINESS_SLEEP_PID=$!
+    wait "${WAIT_FOR_READINESS_SLEEP_PID}"
   done;
 }
 
@@ -331,6 +348,7 @@ watch_for_readiness() {
 
 # Catch exit and execute clean_exit function
 trap "clean_exit" EXIT
+trap "clean_exit" TERM
 
 # Initialise an empty tombstone
 carve_tombstone
@@ -343,23 +361,23 @@ fi
 
 # If birth deps are passed, watch for them and continue once fulfilled
 if [ ! -z "${BIRTH_DEPS}" ]; then
-  wait_for_deps_event "${BIRTH_DEPS}" ready ${BIRTH_TIMEOUT}& BIRTH_WATCHER_PID=$!
-  wait ${BIRTH_WATHER_PID}
+  wait_for_deps_event "${BIRTH_DEPS}" ready "${BIRTH_TIMEOUT}"& BIRTH_WATCHER_PID=$!
+  wait "${BIRTH_WATCHER_PID}"
 fi
 
 # Launch child process
-"${CHILD_CMD}"& CHILD_PID=$!
-echo "[status]     alive"
+"${@}"& CHILD_PID=$!
+echo "[status]     alive (pid: ${CHILD_PID})"
 carve_tombstone birth
 
 # If readiness command is given, wait for readiness
 if [ ! -z "${READY_CMD}" ]; then
   watch_for_readiness& READINESS_WATCHER_PID=$!
-  wait ${READINESS_WATCHER_PID}
+  wait "${READINESS_WATCHER_PID}"
 fi
 echo "[status]     ready"
 carve_tombstone ready
 
-wait ${CHILD_PID}
-CHILD_EXIT_CODE=${?}
+wait "${CHILD_PID}"
+CHILD_EXIT_CODE="${?}"
 echo "[status]     Child exited with code: ${CHILD_EXIT_CODE}"
