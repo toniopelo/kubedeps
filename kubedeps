@@ -254,10 +254,9 @@ wait_for() {
   WAIT_FOR_EVENT="${2}"
   WAIT_FOR_FILES=$(echo "${1}" | tr ',' ' ')
 
-  echo "WAIT_FOR_FILES ${WAIT_FOR_FILES}"
+  echo "[watcher]    > Waiting for ${1} to fulfill event: ${WAIT_FOR_EVENT}"
   # Loop until event are fulfilled
   while true; do
-    echo "[watcher]    > Waiting for ${1} to fulfill event: ${WAIT_FOR_EVENT}"
     # For every deps, check if the event is fulfilled
     for file in ${WAIT_FOR_FILES}; do
       WAIT_FOR_FILE="${GRAVEYARD}/${file}"
