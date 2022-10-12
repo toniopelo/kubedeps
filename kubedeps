@@ -220,6 +220,8 @@ clean_exit() {
     # If child process did exit before timeout, stop the timeout process
     kill -ALRM "${TIMEOUT_PROCESS_PID}"
     echo "[main]       Graceful shutdown done."
+  elif [ ! -z "${CHILD_EXIT_CODE}" ]; then
+    carve_tombstone death
   elif [ -z "${CHILD_PID}" ]; then
     echo "[main]       Child was never started, exiting."
     carve_tombstone death
