@@ -24,7 +24,7 @@ usage() {
       KUBEDEPS_BIRTH_DEPS
         e.g. deps1,deps2
         default to none (empty string)
-        list of coma separated birth deps (corresponding to KUBEDEPS_NAME of the deps)
+        list of comma separated birth deps (corresponding to KUBEDEPS_NAME of the deps). Note that birth deps will be fulfilled once all the birth deps are in ready state (not just born).
       KUBEDEPS_BIRTH_TIMEOUT
         e.g. 15
         default to 30
@@ -32,7 +32,7 @@ usage() {
       KUBEDEPS_DEATH_DEPS
         e.g. deps3,deps4
         default to none (empty string)
-        list of coma separated death deps (corresponding to KUBEDEPS_NAME of the deps)
+        list of comma separated death deps (corresponding to KUBEDEPS_NAME of the deps)
       KUBEDEPS_GRACE_PERIOD
         e.g. 45
         default to 30
