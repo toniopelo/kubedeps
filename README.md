@@ -1,5 +1,7 @@
 # kubedeps
 A tiny birth/death/readiness dependency utility written in shell, with portability in mind (POSIX shell compatible).
+:warning: It will be considered battle-tested once it reach v1.0.0, before that use at you own risk.
+:warning: You should use fixed version when downloading this tool to avoid breaking changes.
 
 ## Setup
 
