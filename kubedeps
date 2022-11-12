@@ -290,20 +290,21 @@ wait_for_deps_event() {
   if [ ! -z "${WAIT_FOR_DEPS_TIEMOUT}" ]; then
     # If timeout is reached, kill watcher and exit
     wait_for_deps_event_timeout_reached() {
-      echo "[error]     timeout reached before deps conditions were fulfilled (${WAIT_FOR_DEPS}: ${WAIT_FOR_DEPS_EVENT})"
-      exit
+      echo "[error]      timeout reached before deps conditions were fulfilled (${WAIT_FOR_DEPS}: ${WAIT_FOR_DEPS_EVENT})"
+      # When this function exit because the timeout was reached, return an error code
+      exit 1
     }
     trap "wait_for_deps_event_timeout_reached" ALRM
     wait_for_deps_event_before_exit() {
-      kill -TERM "${SHOULD_LIVE_WATCHER_PID}" "${SHOULD_LIVE_TIMEOUT_PID}" > /dev/null 2>&1
+      kill -TERM "${WATCHER_WATCHER_PID}" "${WATCHER_TIMEOUT_PID}" > /dev/null 2>&1
     }
     trap "wait_for_deps_event_before_exit" EXIT
 
     # Start watching for event and start timeout countdown
-    wait_for "${WAIT_FOR_DEPS}" "${WAIT_FOR_DEPS_EVENT}"& SHOULD_LIVE_WATCHER_PID=$!
-    timeout_for "${WAIT_FOR_DEPS_TIEMOUT}"& SHOULD_LIVE_TIMEOUT_PID=$!
+    wait_for "${WAIT_FOR_DEPS}" "${WAIT_FOR_DEPS_EVENT}"& WATCHER_WATCHER_PID=$!
+    timeout_for "${WAIT_FOR_DEPS_TIEMOUT}"& WATCHER_TIMEOUT_PID=$!
     # Wait for watcher to complete successfully
-    wait "${SHOULD_LIVE_WATCHER_PID}"
+    wait "${WATCHER_WATCHER_PID}"
     exit
   else
     wait_for "${WAIT_FOR_DEPS}" "${WAIT_FOR_DEPS_EVENT}"
@@ -322,6 +323,24 @@ watch_for_death_deps() {
   kill -TERM "${KUBEDEPS_PID}"
 }
 
+watch_for_birth_deps() {
+  watch_for_birth_deps_before_exit() {
+    kill -TERM "${WAIT_FOR_BIRTH_DEPS}" > /dev/null 2>&1
+  }
+  trap "watch_for_birth_deps_before_exit" EXIT
+
+  wait_for_deps_event "${BIRTH_DEPS}" ready "${BIRTH_TIMEOUT}"& WAIT_FOR_BIRTH_DEPS=$!
+  wait "${WAIT_FOR_BIRTH_DEPS}"
+  WAIT_FOR_BIRTH_DEPS_EXIT_CODE="${?}"
+
+  # If birth deps reached timeout, we kill the main process
+  if [ "${WAIT_FOR_BIRTH_DEPS_EXIT_CODE}" -ne 0 ]; then
+    kill -TERM "${KUBEDEPS_PID}"
+  else
+    echo "[watcher]    > Birth dependecies are met"
+  fi
+}
+
 watch_for_readiness() {
   watch_for_readiness_before_exit() {
     trap - EXIT
@@ -329,7 +348,7 @@ watch_for_readiness() {
   }
   trap "watch_for_readiness_before_exit" EXIT
   watch_for_readiness_timeout_reached() {
-    echo "[error]     timeout reached while waiting for child process to be ready"
+    echo "[error]      timeout reached while waiting for child process to be ready"
     kill -TERM "${KUBEDEPS_PID}"
   }
   trap "watch_for_readiness_timeout_reached" ALRM
@@ -362,7 +381,7 @@ fi
 
 # If birth deps are passed, watch for them and continue once fulfilled
 if [ ! -z "${BIRTH_DEPS}" ]; then
-  wait_for_deps_event "${BIRTH_DEPS}" ready "${BIRTH_TIMEOUT}"& BIRTH_WATCHER_PID=$!
+  watch_for_birth_deps& BIRTH_WATCHER_PID=$!
   wait "${BIRTH_WATCHER_PID}"
 fi
 
