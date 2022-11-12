@@ -33,7 +33,7 @@ ENTRYPOINT [ "./kubedeps" ]
 CMD [ "yarn", "start" ]
 ```
 
-Replace in the dockerfile instruction above `<KUBEDEPS_TAG_VERSION>` by the fixed tag version you want to use. (e.g. `v0.3.3`)
+Replace in the dockerfile instruction above `<KUBEDEPS_TAG_VERSION>` by the fixed tag version you want to use. (e.g. `v0.3.4`)
 
 
 ### Kubernetes example
@@ -45,7 +45,7 @@ ENTRYPOINT [ "./kubedeps" ]
 CMD [ "yarn", "start" ]
 ```
 
-Replace in the dockerfile instruction above `<KUBEDEPS_TAG_VERSION>` by the fixed tag version you want to use. (e.g. `v0.3.3`)
+Replace in the dockerfile instruction above `<KUBEDEPS_TAG_VERSION>` by the fixed tag version you want to use. (e.g. `v0.3.4`)
 
 ```yaml
 apiVersion: batch/v1
