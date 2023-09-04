@@ -53,6 +53,8 @@ usage() {
         e.g. 0
         default to none, will use the child process exit code
         exit code used by the kubedeps process
+      KUBEDEPS_DISABLE_LOGGING
+        if this variable is set, kubedeps will do less verbose logging, e.g. not log the config at startup
   "
 }
 
@@ -73,6 +75,12 @@ elif [ "${#}" -eq 0 ]; then
   usage
   exit 1
 fi
+
+log() {
+  if [ -z "${KUBEDEPS_DISABLE_LOGGING}" ];
+  then echo $1;
+  fi
+}
 
 NAME=${KUBEDEPS_NAME}
 GRAVEYARD=${KUBEDEPS_GRAVEYARD}
@@ -107,7 +115,7 @@ CHILD_EXIT_CODE=
 ## Print values on startup
 ###
 
-echo "
+log "
 --------
   Starting kubedeps with values
   
@@ -165,15 +173,15 @@ carve_tombstone() {
     echo "[error]      conflict, ${GRAVEYARD}/${NAME} already exists"
     exit 2
   elif [ -z "${1}" ]; then
-    echo "[tombstone]  Creating tombstone at ${GRAVEYARD}/${NAME}"
-    echo 'birth:' > "${GRAVEYARD}/${NAME}"
-    echo 'ready:' >> "${GRAVEYARD}/${NAME}"
-    echo 'death:' >> "${GRAVEYARD}/${NAME}"
+    log "[tombstone]  Creating tombstone at ${GRAVEYARD}/${NAME}"
+    log 'birth:' > "${GRAVEYARD}/${NAME}"
+    log 'ready:' >> "${GRAVEYARD}/${NAME}"
+    log 'death:' >> "${GRAVEYARD}/${NAME}"
   elif [ ! -w "${GRAVEYARD}/${NAME}" ]; then
     echo "[error]      ${GRAVEYARD}/${NAME} is not found or is not writable"
     exit 3
   elif [ ! -z "${1}" ] && [ -w "${GRAVEYARD}/${NAME}" ]; then
-    echo "[tombstone]  Carving ${1} on tombstone at ${GRAVEYARD}/${NAME}"
+    log "[tombstone]  Carving ${1} on tombstone at ${GRAVEYARD}/${NAME}"
     if ! grep -q -e "^${1}:$" "${GRAVEYARD}/${NAME}"; then
       echo "[error]      conflict, ${1} already carved on ${GRAVEYARD}/${NAME}"
       exit 4
@@ -191,7 +199,7 @@ clean_exit() {
   # Clean signal trap for EXIT
   trap - EXIT
 
-  echo "[main]       Process exit started."
+  log "[main]       Process exit started."
 
   # If the child process was started, bring it down gracefully or
   # forcefully if timeout is exceeded
@@ -200,7 +208,7 @@ clean_exit() {
     exit_after_grace_period_timeout() {
       # Clean signal trap for ALRM
       trap - ALRM
-      echo "[watcher]    Children grace period timed out"
+      log "[watcher]    Children grace period timed out"
       carve_tombstone death
       # Exit with error code because child was forced exit
       exit 5
@@ -209,26 +217,26 @@ clean_exit() {
 
     # Sending SIGTERM to child process, allowwing for graceful shutdown
     kill -TERM "${CHILD_PID}" > /dev/null 2>&1
-    echo "[watcher]    Waiting for graceful shutdown or timeout (${GRACE_PERIOD}s)"
+    log "[watcher]    Waiting for graceful shutdown or timeout (${GRACE_PERIOD}s)"
     # Launching a timeout process in the background and store its PID in TIMEOUT_PROCESS_PID
     timeout_for ${GRACE_PERIOD}& TIMEOUT_PROCESS_PID=$!
     # Wait for child process to exit
     wait "${CHILD_PID}"
     CHILD_EXIT_CODE="${?}"
-    echo "[status]     Child exited with code: ${CHILD_EXIT_CODE}"
+    log "[status]     Child exited with code: ${CHILD_EXIT_CODE}"
     carve_tombstone death
     # If child process did exit before timeout, stop the timeout process
     kill -ALRM "${TIMEOUT_PROCESS_PID}"
-    echo "[main]       Graceful shutdown done."
+    log "[main]       Graceful shutdown done."
   elif [ ! -z "${CHILD_EXIT_CODE}" ]; then
     carve_tombstone death
   elif [ -z "${CHILD_PID}" ]; then
-    echo "[main]       Child was never started, exiting."
+    log "[main]       Child was never started, exiting."
     carve_tombstone death
     exit 6
   fi
 
-  echo "[main]       Done."
+  log "[main]       Done."
   if [ ! -z "${EXIT_CODE}" ]; then
     exit "${EXIT_CODE}"
   elif [ ! -z "${CHILD_EXIT_CODE}" ]; then
@@ -244,11 +252,11 @@ is_event_fulfilled() {
 
   # Check if this specific dep fulfilled the event, return no if it didn't or yes if it did
   if [ ! -f "${WAIT_FOR_FILE}" ] || ! grep -q -E "^${EVENT_TO_CHECK}: .+" "${FILE_TO_CHECK}"; then
-    echo no
+    log no
     exit
   fi
 
-  echo yes
+  log yes
 }
 
 wait_for() {
@@ -256,7 +264,7 @@ wait_for() {
   WAIT_FOR_EVENT="${2}"
   WAIT_FOR_FILES=$(echo "${1}" | tr ',' ' ')
 
-  echo "[watcher]    > Waiting for ${1} to fulfill event: ${WAIT_FOR_EVENT}"
+  log "[watcher]    > Waiting for ${1} to fulfill event: ${WAIT_FOR_EVENT}"
   # Loop until event are fulfilled
   while true; do
     # For every deps, check if the event is fulfilled
@@ -275,7 +283,7 @@ wait_for() {
     if [ "${IS_FULFILLED}" = "no" ]; then
       sleep "${POLLING_INTERVAL}"
     else
-      echo "[watcher]    > Events fulfilled"
+      log "[watcher]    > Events fulfilled"
       break
     fi
   done
@@ -319,7 +327,7 @@ watch_for_death_deps() {
 
   wait_for_deps_event "${DEATH_DEPS}" death& WAIT_FOR_DEATH_DEPS=$!
   wait "${WAIT_FOR_DEATH_DEPS}"
-  echo "[watcher]    > Death dependecies are met"
+  log "[watcher]    > Death dependecies are met"
   kill -TERM "${KUBEDEPS_PID}"
 }
 
@@ -337,7 +345,7 @@ watch_for_birth_deps() {
   if [ "${WAIT_FOR_BIRTH_DEPS_EXIT_CODE}" -ne 0 ]; then
     kill -TERM "${KUBEDEPS_PID}"
   else
-    echo "[watcher]    > Birth dependecies are met"
+    log "[watcher]    > Birth dependecies are met"
   fi
 }
 
@@ -356,7 +364,7 @@ watch_for_readiness() {
   timeout_for "${READY_TIMEOUT}"& WAIT_FOR_READINESS_TIMEOUT_PID=$!
   while ! sh -c "${READY_CMD} > /dev/null 2>&1"
   do
-    echo "> Waiting for child process to be ready"
+    log "> Waiting for child process to be ready"
     sleep "${READY_INTERVAL}"& WAIT_FOR_READINESS_SLEEP_PID=$!
     wait "${WAIT_FOR_READINESS_SLEEP_PID}"
   done;
@@ -387,7 +395,7 @@ fi
 
 # Launch child process
 "${@}"& CHILD_PID=$!
-echo "[status]     alive (pid: ${CHILD_PID})"
+log "[status]     alive (pid: ${CHILD_PID})"
 carve_tombstone birth
 
 # If readiness command is given, wait for readiness
@@ -395,9 +403,9 @@ if [ ! -z "${READY_CMD}" ]; then
   watch_for_readiness& READINESS_WATCHER_PID=$!
   wait "${READINESS_WATCHER_PID}"
 fi
-echo "[status]     ready"
+log "[status]     ready"
 carve_tombstone ready
 
 wait "${CHILD_PID}"
 CHILD_EXIT_CODE="${?}"
-echo "[status]     Child exited with code: ${CHILD_EXIT_CODE}"
+log "[status]     Child exited with code: ${CHILD_EXIT_CODE}"
