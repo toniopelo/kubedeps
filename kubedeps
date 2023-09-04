@@ -253,11 +253,11 @@ is_event_fulfilled() {
 
   # Check if this specific dep fulfilled the event, return no if it didn't or yes if it did
   if [ ! -f "${WAIT_FOR_FILE}" ] || ! grep -q -E "^${EVENT_TO_CHECK}: .+" "${FILE_TO_CHECK}"; then
-    log no
+    echo no
     exit
   fi
 
-  log yes
+  echo yes
 }
 
 wait_for() {
