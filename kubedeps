@@ -175,9 +175,9 @@ carve_tombstone() {
     exit 2
   elif [ -z "${1}" ]; then
     log "[tombstone]  Creating tombstone at ${GRAVEYARD}/${NAME}"
-    log 'birth:' > "${GRAVEYARD}/${NAME}"
-    log 'ready:' >> "${GRAVEYARD}/${NAME}"
-    log 'death:' >> "${GRAVEYARD}/${NAME}"
+    echo 'birth:' > "${GRAVEYARD}/${NAME}"
+    echo 'ready:' >> "${GRAVEYARD}/${NAME}"
+    echo 'death:' >> "${GRAVEYARD}/${NAME}"
   elif [ ! -w "${GRAVEYARD}/${NAME}" ]; then
     echo "[error]      ${GRAVEYARD}/${NAME} is not found or is not writable"
     exit 3
