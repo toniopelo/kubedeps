@@ -155,5 +155,6 @@ Here is the full list of variables with their default and descriptions:
         e.g. 30
         default to 10
         used to determine the number of seconds between each check (birth and death)
+      KUBEDEPS_DISABLE_LOGGING
+        if this variable is set, kubedeps will do less verbose logging, e.g. not log the config at startup
 ```
-
